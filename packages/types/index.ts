@@ -56,6 +56,7 @@ export type VisemeFrame = {
   id: 'V0' | 'V1' | 'V2' | 'V3' | 'V4' | 'V5'
   startMs: number
   endMs: number
+  emphasis?: number
 }
 
 export type BroadcastPayload = {

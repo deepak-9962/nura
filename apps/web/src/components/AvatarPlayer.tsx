@@ -27,6 +27,47 @@ function toMediaUrl(url: string | undefined): string | undefined {
   return `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`
 }
 
+type VisemeId = 'V0' | 'V1' | 'V2' | 'V3' | 'V4' | 'V5'
+
+const VISEME_SHAPES: Record<VisemeId, Record<string, number>> = {
+  V0: { jawOpen: 0.02, mouthOpen: 0.02, viseme_aa: 0, viseme_O: 0, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
+  V1: { jawOpen: 0.08, mouthOpen: 0.09, viseme_aa: 0.14, viseme_O: 0.04, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
+  V2: { jawOpen: 0.1, mouthOpen: 0.12, viseme_aa: 0.06, viseme_O: 0, viseme_E: 0.5, viseme_I: 0.35, viseme_CH: 0 },
+  V3: { jawOpen: 0.22, mouthOpen: 0.24, viseme_aa: 0.58, viseme_O: 0.06, viseme_E: 0.05, viseme_I: 0, viseme_CH: 0 },
+  V4: { jawOpen: 0.14, mouthOpen: 0.16, viseme_aa: 0.15, viseme_O: 0.62, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
+  V5: { jawOpen: 0.06, mouthOpen: 0.08, viseme_aa: 0, viseme_O: 0, viseme_E: 0.08, viseme_I: 0.08, viseme_CH: 0.52 }
+}
+
+function blendVisemeTargets(previousId: VisemeId, currentId: VisemeId, nextId: VisemeId, progress: number): Record<string, number> {
+  const p = THREE.MathUtils.clamp(progress, 0, 1)
+  const prevWeight = p < 0.35 ? (0.35 - p) / 0.35 : 0
+  const nextWeight = p > 0.65 ? (p - 0.65) / 0.35 : 0
+  const currentWeight = 1
+  const sum = prevWeight + currentWeight + nextWeight || 1
+
+  const weights = {
+    prev: prevWeight / sum,
+    current: currentWeight / sum,
+    next: nextWeight / sum
+  }
+
+  const keys = new Set<string>([
+    ...Object.keys(VISEME_SHAPES[previousId]),
+    ...Object.keys(VISEME_SHAPES[currentId]),
+    ...Object.keys(VISEME_SHAPES[nextId])
+  ])
+
+  const blended: Record<string, number> = {}
+  keys.forEach((key) => {
+    blended[key] =
+      (VISEME_SHAPES[previousId][key] ?? 0) * weights.prev +
+      (VISEME_SHAPES[currentId][key] ?? 0) * weights.current +
+      (VISEME_SHAPES[nextId][key] ?? 0) * weights.next
+  })
+
+  return blended
+}
+
 function RpmAvatar({
   energyRef,
   audioRef,
@@ -40,6 +81,7 @@ function RpmAvatar({
   const [modelOffset, setModelOffset] = useState<[number, number, number]>([0, 0, 0])
   const [modelScale, setModelScale] = useState(1)
   const visemeIndexRef = useRef(0)
+  const avatarGroupRef = useRef<THREE.Group | null>(null)
 
   useEffect(() => {
     const box = new THREE.Box3().setFromObject(scene)
@@ -63,13 +105,65 @@ function RpmAvatar({
   }, [scene])
 
   useEffect(() => {
+    // Apply a mild anchor-style rest pose so hands do not stay in an A/T-like spread.
+    scene.traverse((node) => {
+      if (!(node instanceof THREE.Bone)) {
+        return
+      }
+
+      const name = node.name.toLowerCase()
+
+      if (name.includes('leftshoulder')) {
+        node.rotation.z += 0.24
+        node.rotation.x += 0.05
+      }
+      if (name.includes('rightshoulder')) {
+        node.rotation.z -= 0.24
+        node.rotation.x += 0.05
+      }
+
+      if (name.includes('leftarm') || name.includes('leftupperarm')) {
+        node.rotation.z += 0.6
+        node.rotation.x += 0.12
+      }
+      if (name.includes('rightarm') || name.includes('rightupperarm')) {
+        node.rotation.z -= 0.6
+        node.rotation.x += 0.12
+      }
+
+      if (name.includes('leftforearm') || name.includes('leftlowerarm')) {
+        node.rotation.z += 0.18
+        node.rotation.x += 0.08
+      }
+      if (name.includes('rightforearm') || name.includes('rightlowerarm')) {
+        node.rotation.z -= 0.18
+        node.rotation.x += 0.08
+      }
+
+      if (name.includes('lefthand')) {
+        node.rotation.x += 0.06
+        node.rotation.z += 0.08
+      }
+      if (name.includes('righthand')) {
+        node.rotation.x += 0.06
+        node.rotation.z -= 0.08
+      }
+    })
+  }, [scene])
+
+  useEffect(() => {
     visemeIndexRef.current = 0
   }, [visemeFrames])
   
-  useFrame(() => {
+  useFrame((state, delta) => {
     const targetEnergy = energyRef.current
     const frames = visemeFrames ?? []
-    let activeViseme: 'V0' | 'V1' | 'V2' | 'V3' | 'V4' | 'V5' = targetEnergy > 0.05 ? 'V1' : 'V0'
+    let activeViseme: VisemeId = targetEnergy > 0.05 ? 'V1' : 'V0'
+    let hasActiveVisemeFrame = false
+    let frameProgress = 0.5
+    let frameEmphasis = 0.45
+    let previousViseme: VisemeId = 'V0'
+    let nextViseme: VisemeId = activeViseme
 
     const audio = audioRef.current
     if (audio && !audio.paused && frames.length > 0) {
@@ -87,22 +181,56 @@ function RpmAvatar({
       const frame = frames[idx]
       if (frame && tMs >= frame.startMs && tMs <= frame.endMs) {
         activeViseme = frame.id
+        hasActiveVisemeFrame = true
+        frameEmphasis = frame.emphasis ?? 0.45
+        const frameDuration = Math.max(1, frame.endMs - frame.startMs)
+        frameProgress = THREE.MathUtils.clamp((tMs - frame.startMs) / frameDuration, 0, 1)
+        previousViseme = (frames[idx - 1]?.id as VisemeId | undefined) ?? frame.id
+        nextViseme = (frames[idx + 1]?.id as VisemeId | undefined) ?? frame.id
       } else {
         activeViseme = 'V0'
       }
     }
 
-    const visemeShapes: Record<typeof activeViseme, Record<string, number>> = {
-      V0: { jawOpen: 0.02, mouthOpen: 0.02, viseme_aa: 0, viseme_O: 0, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
-      V1: { jawOpen: 0.08, mouthOpen: 0.09, viseme_aa: 0.14, viseme_O: 0.04, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
-      V2: { jawOpen: 0.1, mouthOpen: 0.12, viseme_aa: 0.06, viseme_O: 0, viseme_E: 0.5, viseme_I: 0.35, viseme_CH: 0 },
-      V3: { jawOpen: 0.22, mouthOpen: 0.24, viseme_aa: 0.58, viseme_O: 0.06, viseme_E: 0.05, viseme_I: 0, viseme_CH: 0 },
-      V4: { jawOpen: 0.14, mouthOpen: 0.16, viseme_aa: 0.15, viseme_O: 0.62, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
-      V5: { jawOpen: 0.06, mouthOpen: 0.08, viseme_aa: 0, viseme_O: 0, viseme_E: 0.08, viseme_I: 0.08, viseme_CH: 0.52 }
+    // If audio is still playing but viseme timeline has ended/gapped, keep natural mouth motion.
+    if (audio && !audio.paused && !hasActiveVisemeFrame) {
+      if (targetEnergy > 0.55) {
+        activeViseme = 'V3'
+      } else if (targetEnergy > 0.35) {
+        activeViseme = 'V4'
+      } else if (targetEnergy > 0.12) {
+        activeViseme = 'V1'
+      } else {
+        activeViseme = 'V0'
+      }
+      previousViseme = activeViseme
+      nextViseme = activeViseme
+      frameProgress = 0.5
+      frameEmphasis = 0.35 + THREE.MathUtils.clamp(targetEnergy, 0, 1) * 0.35
     }
 
-    const speechDrive = audio && !audio.paused ? 0.6 + targetEnergy * 0.7 : 0
-    const activeTargets = visemeShapes[activeViseme]
+    const activeTargets = blendVisemeTargets(previousViseme, activeViseme, nextViseme, frameProgress)
+
+    const energyProsody = THREE.MathUtils.smoothstep(targetEnergy, 0.08, 0.8)
+    const prosodyBoost = THREE.MathUtils.clamp(0.75 + frameEmphasis * 0.45 + energyProsody * 0.35, 0.65, 1.35)
+    const speechDrive = audio && !audio.paused ? (0.52 + targetEnergy * 0.75) * prosodyBoost : 0
+
+    const elapsed = state.clock.elapsedTime
+    const blinkPeriod = 3.3 + Math.sin(elapsed * 0.23) * 0.6
+    const blinkPhase = elapsed % Math.max(1.8, blinkPeriod)
+    const blink = blinkPhase < 0.1 ? Math.sin((blinkPhase / 0.1) * Math.PI) : 0
+
+    const nodTarget = audio && !audio.paused
+      ? Math.sin(elapsed * (4.8 + energyProsody * 2.2)) * targetEnergy * 0.026 * prosodyBoost
+      : 0
+
+    if (avatarGroupRef.current) {
+      const nodLerp = 1 - Math.exp(-delta * 6)
+      avatarGroupRef.current.rotation.x += (nodTarget - avatarGroupRef.current.rotation.x) * nodLerp
+    }
+
+    const smoothing = 1 - Math.exp(-delta * 16)
+    const cheekTarget = Math.min(0.18, speechDrive * 0.12 + Math.abs(nodTarget) * 0.7)
 
     scene.traverse((node: any) => {
       if (node.isMesh && node.morphTargetDictionary && node.morphTargetInfluences) {
@@ -113,8 +241,28 @@ function RpmAvatar({
             const idx = dict[shape]
             const current = node.morphTargetInfluences[idx]
             const target = Math.min(1, weight * speechDrive)
-            node.morphTargetInfluences[idx] += (target - current) * 0.33
+            node.morphTargetInfluences[idx] += (target - current) * smoothing
           }
+        })
+
+        const blinkShapes = ['eyeBlinkLeft', 'eyeBlinkRight', 'blinkLeft', 'blinkRight', 'Blink']
+        blinkShapes.forEach((shape) => {
+          if (dict[shape] === undefined) {
+            return
+          }
+          const idx = dict[shape]
+          const current = node.morphTargetInfluences[idx]
+          node.morphTargetInfluences[idx] += (blink - current) * (1 - Math.exp(-delta * 28))
+        })
+
+        const cheekShapes = ['cheekSquintLeft', 'cheekSquintRight', 'cheekPuff']
+        cheekShapes.forEach((shape) => {
+          if (dict[shape] === undefined) {
+            return
+          }
+          const idx = dict[shape]
+          const current = node.morphTargetInfluences[idx]
+          node.morphTargetInfluences[idx] += (cheekTarget - current) * (1 - Math.exp(-delta * 10))
         })
 
         const decayShapes = ['jawOpen', 'mouthOpen', 'viseme_aa', 'viseme_O', 'viseme_E', 'viseme_I', 'viseme_CH']
@@ -123,13 +271,17 @@ function RpmAvatar({
             return
           }
           const idx = dict[shape]
-          node.morphTargetInfluences[idx] += (0 - node.morphTargetInfluences[idx]) * 0.24
+          node.morphTargetInfluences[idx] += (0 - node.morphTargetInfluences[idx]) * (1 - Math.exp(-delta * 10))
         })
       }
     })
   })
 
-  return <primitive object={scene} position={modelOffset} scale={modelScale} />
+  return (
+    <group ref={avatarGroupRef}>
+      <primitive object={scene} position={modelOffset} scale={modelScale} />
+    </group>
+  )
 }
 
 function CameraAim() {
@@ -186,6 +338,9 @@ export function AvatarPlayer({ broadcast }: AvatarPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const rafRef = useRef<number | null>(null)
   const analyzerCleanupRef = useRef<(() => void) | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null)
+  const analyserNodeRef = useRef<AnalyserNode | null>(null)
   const energyRef = useRef(0)
 
   const resolvedVideoUrl = useMemo(() => toMediaUrl(broadcast?.videoUrl), [broadcast?.videoUrl])
@@ -232,13 +387,25 @@ export function AvatarPlayer({ broadcast }: AvatarPlayerProps) {
     }
 
     let cancelled = false
-    const context = new AudioCtx()
-    const source = context.createMediaElementSource(audio)
-    const analyser = context.createAnalyser()
-    analyser.fftSize = 512
-    analyser.smoothingTimeConstant = 0.85
-    source.connect(analyser)
-    analyser.connect(context.destination)
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioCtx()
+    }
+
+    const context = audioContextRef.current
+
+    if (!mediaSourceRef.current) {
+      mediaSourceRef.current = context.createMediaElementSource(audio)
+    }
+
+    if (!analyserNodeRef.current) {
+      analyserNodeRef.current = context.createAnalyser()
+      analyserNodeRef.current.fftSize = 512
+      analyserNodeRef.current.smoothingTimeConstant = 0.85
+      mediaSourceRef.current.connect(analyserNodeRef.current)
+      analyserNodeRef.current.connect(context.destination)
+    }
+
+    const analyser = analyserNodeRef.current
     const bins = new Uint8Array(analyser.frequencyBinCount)
 
     const tick = () => {
@@ -289,9 +456,6 @@ export function AvatarPlayer({ broadcast }: AvatarPlayerProps) {
       audio.removeEventListener('play', onPlay)
       audio.removeEventListener('pause', onStop)
       audio.removeEventListener('ended', onStop)
-      source.disconnect()
-      analyser.disconnect()
-      void context.close()
       shell.style.setProperty('--speech-energy', '0')
       energyRef.current = 0
     }
