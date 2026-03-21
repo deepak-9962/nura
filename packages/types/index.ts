@@ -52,6 +52,12 @@ export type NewsEvent = {
 
 export type BroadcastState = (typeof BROADCAST_STATES)[number]
 
+export type VisemeFrame = {
+  id: 'V0' | 'V1' | 'V2' | 'V3' | 'V4' | 'V5'
+  startMs: number
+  endMs: number
+}
+
 export type BroadcastPayload = {
   broadcastId: string
   generatedAt: string
@@ -61,6 +67,7 @@ export type BroadcastPayload = {
   audioUrl: string
   videoUrl: string
   subtitles: string[]
+  visemeFrames?: VisemeFrame[]
   scriptDebug?: {
     generationPath: 'azure-normal' | 'azure-strict-retry' | 'fallback'
     retries: number

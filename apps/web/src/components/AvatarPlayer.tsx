@@ -27,10 +27,19 @@ function toMediaUrl(url: string | undefined): string | undefined {
   return `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`
 }
 
-function RpmAvatar({ energyRef }: { energyRef: React.MutableRefObject<number> }) {
+function RpmAvatar({
+  energyRef,
+  audioRef,
+  visemeFrames
+}: {
+  energyRef: React.MutableRefObject<number>
+  audioRef: React.MutableRefObject<HTMLAudioElement | null>
+  visemeFrames: BroadcastPayload['visemeFrames']
+}) {
   const { scene } = useGLTF(RPM_MODEL_URL)
   const [modelOffset, setModelOffset] = useState<[number, number, number]>([0, 0, 0])
   const [modelScale, setModelScale] = useState(1)
+  const visemeIndexRef = useRef(0)
 
   useEffect(() => {
     const box = new THREE.Box3().setFromObject(scene)
@@ -52,28 +61,69 @@ function RpmAvatar({ energyRef }: { energyRef: React.MutableRefObject<number> })
       -center.z,
     ])
   }, [scene])
+
+  useEffect(() => {
+    visemeIndexRef.current = 0
+  }, [visemeFrames])
   
   useFrame(() => {
-    const targetEnergy = energyRef.current * 1.2 // slight boost to lip sync visibility
+    const targetEnergy = energyRef.current
+    const frames = visemeFrames ?? []
+    let activeViseme: 'V0' | 'V1' | 'V2' | 'V3' | 'V4' | 'V5' = targetEnergy > 0.05 ? 'V1' : 'V0'
+
+    const audio = audioRef.current
+    if (audio && !audio.paused && frames.length > 0) {
+      const tMs = Math.round(audio.currentTime * 1000)
+      let idx = visemeIndexRef.current
+
+      while (idx < frames.length - 1 && tMs > frames[idx].endMs) {
+        idx += 1
+      }
+      while (idx > 0 && tMs < frames[idx].startMs) {
+        idx -= 1
+      }
+
+      visemeIndexRef.current = idx
+      const frame = frames[idx]
+      if (frame && tMs >= frame.startMs && tMs <= frame.endMs) {
+        activeViseme = frame.id
+      } else {
+        activeViseme = 'V0'
+      }
+    }
+
+    const visemeShapes: Record<typeof activeViseme, Record<string, number>> = {
+      V0: { jawOpen: 0.02, mouthOpen: 0.02, viseme_aa: 0, viseme_O: 0, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
+      V1: { jawOpen: 0.08, mouthOpen: 0.09, viseme_aa: 0.14, viseme_O: 0.04, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
+      V2: { jawOpen: 0.1, mouthOpen: 0.12, viseme_aa: 0.06, viseme_O: 0, viseme_E: 0.5, viseme_I: 0.35, viseme_CH: 0 },
+      V3: { jawOpen: 0.22, mouthOpen: 0.24, viseme_aa: 0.58, viseme_O: 0.06, viseme_E: 0.05, viseme_I: 0, viseme_CH: 0 },
+      V4: { jawOpen: 0.14, mouthOpen: 0.16, viseme_aa: 0.15, viseme_O: 0.62, viseme_E: 0, viseme_I: 0, viseme_CH: 0 },
+      V5: { jawOpen: 0.06, mouthOpen: 0.08, viseme_aa: 0, viseme_O: 0, viseme_E: 0.08, viseme_I: 0.08, viseme_CH: 0.52 }
+    }
+
+    const speechDrive = audio && !audio.paused ? 0.6 + targetEnergy * 0.7 : 0
+    const activeTargets = visemeShapes[activeViseme]
+
     scene.traverse((node: any) => {
       if (node.isMesh && node.morphTargetDictionary && node.morphTargetInfluences) {
         const dict = node.morphTargetDictionary
 
-        const shapeWeights: Record<string, number> = {
-          viseme_O: 0.55,
-          viseme_aa: 0.65,
-          jawOpen: 0.32,
-          mouthOpen: 0.38,
-        }
-
-        Object.entries(shapeWeights).forEach(([shape, weight]) => {
+        Object.entries(activeTargets).forEach(([shape, weight]) => {
           if (dict[shape] !== undefined) {
             const idx = dict[shape]
             const current = node.morphTargetInfluences[idx]
-            const target = Math.min(1, targetEnergy * weight)
-            // Gentle easing prevents sharp vertical stretch in jaw-heavy rigs.
-            node.morphTargetInfluences[idx] += (target - current) * 0.28
+            const target = Math.min(1, weight * speechDrive)
+            node.morphTargetInfluences[idx] += (target - current) * 0.33
           }
+        })
+
+        const decayShapes = ['jawOpen', 'mouthOpen', 'viseme_aa', 'viseme_O', 'viseme_E', 'viseme_I', 'viseme_CH']
+        decayShapes.forEach((shape) => {
+          if (dict[shape] === undefined || Object.prototype.hasOwnProperty.call(activeTargets, shape)) {
+            return
+          }
+          const idx = dict[shape]
+          node.morphTargetInfluences[idx] += (0 - node.morphTargetInfluences[idx]) * 0.24
         })
       }
     })
@@ -287,7 +337,11 @@ export function AvatarPlayer({ broadcast }: AvatarPlayerProps) {
                 <directionalLight position={[1.5, 3, 2.5]} intensity={1.1} color="#ffffff" />
 
                 <Suspense fallback={null}>
-                  <RpmAvatar energyRef={energyRef} />
+                  <RpmAvatar
+                    energyRef={energyRef}
+                    audioRef={audioRef}
+                    visemeFrames={broadcast?.visemeFrames}
+                  />
                 </Suspense>
               </Canvas>
             </CanvasErrorBoundary>

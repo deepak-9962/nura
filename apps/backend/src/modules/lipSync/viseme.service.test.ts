@@ -31,4 +31,25 @@ describe('VisemeService', () => {
     expect(frames.some((frame) => frame.id === 'V4')).toBe(true)
     expect(frames.some((frame) => frame.id === 'V5')).toBe(true)
   })
+
+  it('maps Tamil open vowels to wide mouth visemes', () => {
+    const service = new VisemeService()
+    const frames = service.generate([{ word: 'ஆனா', startMs: 0, endMs: 300 }])
+
+    expect(frames.some((frame) => frame.id === 'V3')).toBe(true)
+  })
+
+  it('maps Tamil front vowels to spread mouth visemes', () => {
+    const service = new VisemeService()
+    const frames = service.generate([{ word: 'இன்று', startMs: 0, endMs: 300 }])
+
+    expect(frames.some((frame) => frame.id === 'V2')).toBe(true)
+  })
+
+  it('prioritizes fricative articulation over vowels in mixed chunks', () => {
+    const service = new VisemeService()
+    const frames = service.generate([{ word: 'செய்தி', startMs: 0, endMs: 300 }])
+
+    expect(frames.some((frame) => frame.id === 'V5')).toBe(true)
+  })
 })

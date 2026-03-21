@@ -130,8 +130,9 @@ export class BroadcastOrchestrator {
     }
 
     this.state = 'RENDERING'
+    let visemeFrames: BroadcastPayload['visemeFrames'] = []
     try {
-      void this.viseme.generate(wordTimestamps)
+      visemeFrames = this.viseme.generate(wordTimestamps)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown viseme generation error'
       logger.error('Viseme generation failed; continuing broadcast without lip keyframes', { message })
@@ -147,6 +148,7 @@ export class BroadcastOrchestrator {
       audioUrl,
       videoUrl: '/assets/mock-anchor-video.mp4',
       subtitles,
+      visemeFrames,
       scriptDebug: meta
     }
 

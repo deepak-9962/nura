@@ -4,23 +4,87 @@ export interface VisemeFrame {
   endMs: number
 }
 
+const ROUND_VOWEL_PATTERN = /(oo|oh|ou|u|o|w|உ|ஊ|ஒ|ஓ|ஔ|ு|ூ|ொ|ோ|ௌ)/giu
+const OPEN_VOWEL_PATTERN = /(aa|a|ai|அ|ஆ|ா|ஐ|ை)/giu
+const FRONT_VOWEL_PATTERN = /(ee|ii|e|i|இ|ஈ|எ|ஏ|ி|ீ|ெ|ே)/giu
+const FRICATIVE_PATTERN = /(s|sh|z|zh|ch|j|ஸ|ஷ|ச|ஜ|ஶ|ழ)/giu
+const CLOSED_LIP_PATTERN = /(m|p|b|f|v|w|ம்|ப்|ப்|ம|ப|வ)/giu
+
+function matchCount(input: string, pattern: RegExp): number {
+  const matches = input.match(pattern)
+  return matches ? matches.length : 0
+}
+
+function splitTamilPhoneticUnits(word: string): string[] {
+  // Tamil consonant + optional vowel sign or pulli, plus standalone vowels.
+  const units = word.match(/[அஆஇஈஉஊஎஏஐஒஓஔ]|[க-ஹ][ாிீுூெேைொோௌ்]?/gu)
+  return units ?? []
+}
+
+function splitLatinPhoneticUnits(word: string): string[] {
+  // Separate consonant and vowel runs to preserve articulation transitions.
+  const units = word.match(/[bcdfghjklmnpqrstvwxyz]+|[aeiou]+|\d+/giu)
+  return units ?? []
+}
+
+function splitPhoneticUnits(word: string): string[] {
+  if (/[\u0B80-\u0BFF]/u.test(word)) {
+    const tamilUnits = splitTamilPhoneticUnits(word)
+    if (tamilUnits.length > 0) {
+      return tamilUnits
+    }
+  }
+
+  const latinUnits = splitLatinPhoneticUnits(word)
+  if (latinUnits.length > 0) {
+    return latinUnits
+  }
+
+  return [word]
+}
+
+function bucketUnits(units: string[], segments: number): string[] {
+  if (segments <= 1 || units.length <= 1) {
+    return [units.join('')]
+  }
+
+  const chunkSize = Math.max(1, Math.ceil(units.length / segments))
+  const chunks: string[] = []
+
+  for (let i = 0; i < units.length; i += chunkSize) {
+    chunks.push(units.slice(i, i + chunkSize).join(''))
+  }
+
+  return chunks
+}
+
 function toViseme(word: string): VisemeFrame['id'] {
-  const normalized = word.toLowerCase().trim()
+  const normalized = word.toLowerCase().trim().replace(/[^\p{L}\p{M}]+/gu, '')
 
   if (normalized.length === 0 || /^\p{P}+$/u.test(normalized)) {
     return 'V0'
   }
-  if (/(oo|uu|u|o|ோ|ூ|ு|ொ|ோ)/u.test(normalized)) {
-    return 'V4'
-  }
-  if (/(aa|a|ா|அ|ஆ|ஓ|ஒ)/u.test(normalized)) {
-    return 'V3'
-  }
-  if (/(ee|ii|e|i|ே|ெ|ீ|ி)/u.test(normalized)) {
-    return 'V2'
-  }
-  if (/(s|sh|z|zh|ஸ|ஷ|ச|ஜ)/u.test(normalized)) {
-    return 'V5'
+
+  const scoreV5 = matchCount(normalized, FRICATIVE_PATTERN) * 1.4
+  const scoreV4 = matchCount(normalized, ROUND_VOWEL_PATTERN)
+  const scoreV3 = matchCount(normalized, OPEN_VOWEL_PATTERN)
+  const scoreV2 = matchCount(normalized, FRONT_VOWEL_PATTERN)
+  const scoreV1 = matchCount(normalized, CLOSED_LIP_PATTERN) + (normalized.includes('்') ? 0.5 : 0)
+
+  const ranked: Array<[VisemeFrame['id'], number]> = [
+    ['V5', scoreV5],
+    ['V4', scoreV4],
+    ['V3', scoreV3],
+    ['V2', scoreV2],
+    ['V1', scoreV1]
+  ]
+
+  const [bestViseme, bestScore] = ranked.reduce((best, current) =>
+    current[1] > best[1] ? current : best
+  )
+
+  if (bestScore > 0) {
+    return bestViseme
   }
 
   return 'V1'
@@ -31,14 +95,8 @@ function splitWord(word: string, segments: number): string[] {
     return [word]
   }
 
-  const chunkSize = Math.max(1, Math.ceil(word.length / segments))
-  const chunks: string[] = []
-
-  for (let i = 0; i < word.length; i += chunkSize) {
-    chunks.push(word.slice(i, i + chunkSize))
-  }
-
-  return chunks
+  const units = splitPhoneticUnits(word)
+  return bucketUnits(units, segments)
 }
 
 function mergeAdjacent(frames: VisemeFrame[]): VisemeFrame[] {
