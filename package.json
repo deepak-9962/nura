@@ -1,0 +1,24 @@
+{
+  "name": "nura-ai-news-anchor",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w backend\" \"npm run dev -w web\"",
+    "dev:web": "npm run dev -w web",
+    "dev:backend": "npm run dev -w backend",
+    "build": "npm run build -w backend && npm run build -w web",
+    "test": "npm run test -ws --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
