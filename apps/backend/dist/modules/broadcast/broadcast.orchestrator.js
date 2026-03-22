@@ -8,12 +8,14 @@ import { ScriptGenService } from '../scriptGen/scriptGen.service.js';
 import { TtsService } from '../tts/tts.service.js';
 import { CycleRepository } from '../../repositories/cycle.repository.js';
 import { EventRepository } from '../../repositories/event.repository.js';
+import { loadConfig } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 export class BroadcastOrchestrator {
     state = 'IDLE';
     current = null;
     cycleInFlight = null;
     breakOverrideRequested = false;
+    config = loadConfig();
     ingestion = new IngestionService();
     dedup = new DedupService();
     ranker = new RankerService();
@@ -52,6 +54,11 @@ export class BroadcastOrchestrator {
         }
         catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown ingestion error';
+            if (this.config.liveNewsOnly) {
+                this.state = 'ERROR';
+                logger.error('Ingestion failed in live-news-only mode; cycle aborted', { message });
+                throw new Error('Live news fetch failed. Check internet/API keys and try again.');
+            }
             logger.error('Ingestion failed; falling back to seed articles', { message });
             articles = generateSeedArticles();
         }
@@ -115,8 +122,9 @@ export class BroadcastOrchestrator {
             logger.error('TTS synthesis failed; continuing with previous audio if available', { message });
         }
         this.state = 'RENDERING';
+        let visemeFrames = [];
         try {
-            void this.viseme.generate(wordTimestamps);
+            visemeFrames = this.viseme.generate(wordTimestamps);
         }
         catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown viseme generation error';
@@ -132,6 +140,7 @@ export class BroadcastOrchestrator {
             audioUrl,
             videoUrl: '/assets/mock-anchor-video.mp4',
             subtitles,
+            visemeFrames,
             scriptDebug: meta
         };
         try {

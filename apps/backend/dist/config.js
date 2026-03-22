@@ -1,5 +1,6 @@
 export function loadConfig() {
     const demoMode = (process.env.DEMO_MODE ?? 'false').toLowerCase() === 'true';
+    const liveNewsOnly = (process.env.LIVE_NEWS_ONLY ?? 'true').toLowerCase() === 'true';
     const port = Number(process.env.PORT ?? '4000');
     if (!Number.isFinite(port) || port <= 0) {
         throw new Error('PORT must be a positive number');
@@ -10,6 +11,7 @@ export function loadConfig() {
     }
     return {
         demoMode,
+        liveNewsOnly,
         port,
         broadcastIntervalMinutes,
         databasePath: process.env.DATABASE_PATH ?? 'apps/backend/data/news-anchor.sqlite',

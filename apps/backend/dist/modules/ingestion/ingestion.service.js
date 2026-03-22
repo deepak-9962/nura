@@ -38,6 +38,9 @@ export class IngestionService {
         }
         const normalized = this.mergeUniqueArticles(batches.flat());
         if (normalized.length === 0) {
+            if (this.config.liveNewsOnly) {
+                throw new Error('No live articles ingested from internet sources');
+            }
             logger.warn('No live articles ingested; using seed fallback');
             normalized.push(...generateSeedArticles());
         }

@@ -11,7 +11,10 @@ const RPM_MODEL_URL = '/assets/models/anchor.glb'
 function supportsWebGL(): boolean {
   try {
     const canvas = document.createElement('canvas')
-    return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl'))
+    return Boolean(
+      canvas.getContext('webgl2', { failIfMajorPerformanceCaveat: false }) ||
+      canvas.getContext('webgl', { failIfMajorPerformanceCaveat: false })
+    )
   } catch {
     return false
   }
@@ -334,6 +337,8 @@ export function AvatarPlayer({ broadcast }: AvatarPlayerProps) {
   const [videoFailed, setVideoFailed] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [webglBlocked, setWebglBlocked] = useState(false)
+  const [webglAvailable, setWebglAvailable] = useState(() => supportsWebGL())
+  const [webglRetryKey, setWebglRetryKey] = useState(0)
   const shellRef = useRef<HTMLElement | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const rafRef = useRef<number | null>(null)
@@ -349,25 +354,45 @@ export function AvatarPlayer({ broadcast }: AvatarPlayerProps) {
   const hasVideo = useMemo(() => {
     return Boolean(resolvedVideoUrl) && !videoFailed
   }, [resolvedVideoUrl, videoFailed])
-  const webglSupported = useMemo(() => supportsWebGL(), [])
+
+  const retryWebGL = () => {
+    const available = supportsWebGL()
+    setWebglAvailable(available)
+    setWebglBlocked(!available)
+    if (available) {
+      setWebglRetryKey((prev) => prev + 1)
+    }
+  }
 
   const onCanvasError = (error: Error) => {
     const message = error.message ?? ''
     if (message.includes('WebGL context') || message.includes('Error creating WebGL')) {
+      setWebglAvailable(false)
       setWebglBlocked(true)
     }
   }
 
   useEffect(() => {
-    const handleError = (event: ErrorEvent) => {
-      const message = String(event.message ?? '')
-      if (message.includes('Error creating WebGL context') || message.includes('A WebGL context could not be created')) {
-        setWebglBlocked(true)
+    const recoverIfAvailable = () => {
+      const available = supportsWebGL()
+      setWebglAvailable(available)
+      if (available) {
+        setWebglBlocked(false)
       }
     }
 
-    window.addEventListener('error', handleError)
-    return () => window.removeEventListener('error', handleError)
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        recoverIfAvailable()
+      }
+    }
+
+    window.addEventListener('focus', recoverIfAvailable)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('focus', recoverIfAvailable)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
   }, [])
 
   useEffect(() => {
@@ -480,20 +505,23 @@ export function AvatarPlayer({ broadcast }: AvatarPlayerProps) {
         />
       ) : (
         <div className={`avatar-portrait-shell ${isSpeaking ? 'is-speaking' : ''}`}>
-          {!webglSupported || webglBlocked ? (
+          {!webglAvailable || webglBlocked ? (
             <div className="avatar-fallback" role="status" aria-live="polite">
               <div className="avatar-face">
                 <div className="eyes" />
                 <div className="mouth" />
               </div>
               <p>WebGL is blocked in this browser session. Reload the tab or enable hardware acceleration to view 3D.</p>
+              <button type="button" onClick={retryWebGL}>Retry 3D</button>
             </div>
           ) : (
-            <CanvasErrorBoundary onRenderError={onCanvasError}>
+            <CanvasErrorBoundary key={webglRetryKey} onRenderError={onCanvasError}>
               <Canvas
+                key={webglRetryKey}
                 camera={{ position: [0, 1.05, 2.35], fov: 27 }}
                 dpr={[1, 1.25]}
-                gl={{ antialias: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: true }}
+                gl={{ antialias: false, powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false }}
+                onCreated={() => setWebglBlocked(false)}
               >
                 <CameraAim />
                 <ambientLight intensity={1} />

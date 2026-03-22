@@ -2,6 +2,55 @@ import { AzureOpenAiClient } from '../../clients/azureOpenAi.client.js';
 import { loadConfig } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { evaluateTamilScriptQuality } from './tamilQuality.guard.js';
+const REPEATED_BOILERPLATE_PATTERNS = [
+    /இந்த\s+பக்க(?:த்தில்|த)\s*பார்க்கலாம்\.?/i,
+    /சமீபத்திய\s+நிகழ்வுகள்\s+பற்றிய\s+தகவல்களை?/i
+];
+function normalizeForDedup(text) {
+    return text
+        .toLowerCase()
+        .replace(/[\s\u200B\u200C\u200D]+/g, ' ')
+        .replace(/[.,!?;:"'()\[\]{}]/g, '')
+        .trim();
+}
+function splitSentences(text) {
+    return text
+        .split(/(?<=[.!?])\s+|\n+/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+}
+function stripLeadingHeadline(summary, headline) {
+    const normalizedSummary = normalizeForDedup(summary);
+    const normalizedHeadline = normalizeForDedup(headline);
+    if (!normalizedHeadline || !normalizedSummary.startsWith(normalizedHeadline)) {
+        return summary;
+    }
+    const escapedHeadline = headline.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return summary.replace(new RegExp(`^\\s*${escapedHeadline}[\\s:.,-]*`, 'i'), '').trim();
+}
+function sanitizeSummary(headline, summary) {
+    const compact = summary.replace(/\s+/g, ' ').trim();
+    const withoutHeadlinePrefix = stripLeadingHeadline(compact, headline);
+    const parts = splitSentences(withoutHeadlinePrefix);
+    const deduped = [];
+    const seen = new Set();
+    for (const part of parts) {
+        const cleaned = part.replace(/\s+/g, ' ').trim();
+        if (!cleaned) {
+            continue;
+        }
+        if (REPEATED_BOILERPLATE_PATTERNS.some((pattern) => pattern.test(cleaned))) {
+            continue;
+        }
+        const key = normalizeForDedup(cleaned);
+        if (!key || seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        deduped.push(cleaned);
+    }
+    return deduped.join(' ');
+}
 export class ScriptGenService {
     config = loadConfig();
     azureOpenAi = new AzureOpenAiClient();
@@ -13,10 +62,11 @@ export class ScriptGenService {
             return this.toBilingualFallbackLine(event, order);
         });
         const fallbackScript = [intro, ...storyLines, outro].join(' ');
+        const fallbackSubtitles = this.toSubtitles(fallbackScript);
         if (this.config.demoMode) {
             return {
                 script: fallbackScript,
-                subtitles: [intro, ...storyLines, outro],
+                subtitles: fallbackSubtitles,
                 meta: {
                     generationPath: 'fallback',
                     retries: 0,
@@ -71,7 +121,7 @@ export class ScriptGenService {
         const script = fallbackScript;
         return {
             script,
-            subtitles: [intro, ...storyLines, outro],
+            subtitles: fallbackSubtitles,
             meta: {
                 generationPath: 'fallback',
                 retries: 1,
@@ -81,14 +131,13 @@ export class ScriptGenService {
     }
     toBilingualFallbackLine(event, order) {
         const categoryLabel = this.toTamilCategory(event.category);
-        const enCategory = event.category.toLowerCase();
+        const safeHeadline = event.headline.trim() || 'Latest update';
+        const safeSummary = sanitizeSummary(safeHeadline, event.summary).slice(0, 220) || safeHeadline;
+        const sourceCount = event.articles.length;
         const breakingLineTa = event.isBreaking
             ? 'இது உடனடி கவனத்திற்கு உரிய முக்கிய செய்தி.'
             : 'இதற்கான மேலும் தகவல்கள் தொடர்ந்து வரவிருக்கின்றன.';
-        const breakingLineEn = event.isBreaking
-            ? 'This is a major breaking update.'
-            : 'More details will follow shortly.';
-        return `Story ${order} is regarding ${enCategory}. செய்தி ${order}. ${categoryLabel} தொடர்பான முக்கிய நிலவரம் தற்போது வெளியாகியுள்ளது. ${breakingLineEn} ${breakingLineTa}`;
+        return `செய்தி ${order}: ${categoryLabel} பிரிவில், ${safeHeadline}. சுருக்கம்: ${safeSummary}. ${sourceCount} மூலங்களில் இருந்து இந்த செய்தி தொகுக்கப்பட்டது. ${breakingLineTa}`;
     }
     toTamilCategory(category) {
         const labels = {
@@ -103,10 +152,19 @@ export class ScriptGenService {
         return labels[category];
     }
     toSubtitles(script) {
-        const lines = script
-            .split(/\.|\?|!/)
-            .map((line) => line.trim())
-            .filter(Boolean);
-        return lines.length > 0 ? lines : [script];
+        const lines = splitSentences(script)
+            .map((line) => line.replace(/\s+/g, ' ').trim())
+            .filter((line) => line.length >= 3);
+        const deduped = [];
+        const seen = new Set();
+        for (const line of lines) {
+            const key = normalizeForDedup(line);
+            if (!key || seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            deduped.push(line);
+        }
+        return deduped.length > 0 ? deduped : [script];
     }
 }
